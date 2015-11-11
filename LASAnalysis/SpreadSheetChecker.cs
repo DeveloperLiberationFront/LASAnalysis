@@ -61,7 +61,6 @@ namespace LASAnalysis
         // Loads the answer key from the answer file into a dictionary as <cell_location, value> pairs.
         private void LoadAnswerKey()
         {
-            // Get the range C2:C62 
             answerMap = new Dictionary<string, string>();
             GetCellRangeValues(ConfigurationManager.AppSettings["AnswerFile"], answerMap);
         }
