@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Configuration;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
@@ -20,6 +21,16 @@ namespace LASAnalysis
             this.summaryBuilder = new StringBuilder();
             this.detailedResultBuilder = new StringBuilder();
 
+            // Set up the file names from configuration.
+            this.errorFile = ConfigurationManager.AppSettings["ErrorFile"];
+            this.summaryOutputFile = ConfigurationManager.AppSettings["SummaryFile"];
+            this.detailedResultOutputFile = ConfigurationManager.AppSettings["DetailedFile"];
+
+            // Set up the checking parameters.            
+            this.columnToCheck = ConfigurationManager.AppSettings["ColToCheck"];
+            this.startColumnIndex = Int32.Parse(ConfigurationManager.AppSettings["ColStartIndex"]);
+            this.endColumnIndex = Int32.Parse(ConfigurationManager.AppSettings["ColEndIndex"]);
+
             // Add headers for output files.
             summaryBuilder.Append("Filename,No. of Incorrect Input" + System.Environment.NewLine);
             detailedResultBuilder.Append("Filename,Incorrect Cell,Given Input,Correct Answer" + System.Environment.NewLine);
@@ -28,7 +39,7 @@ namespace LASAnalysis
             LoadAnswerKey();
 
             // Make sure to have the directory created, if it does not exist.
-            Directory.CreateDirectory(Path.GetDirectoryName(_summaryOutputFile));
+            Directory.CreateDirectory(Path.GetDirectoryName(summaryOutputFile));
 
             Console.WriteLine("Fetching refracted light from Saturn's rings, and analyzing some spreadsheets...");
 
@@ -38,12 +49,11 @@ namespace LASAnalysis
             Console.WriteLine("Done with the spreadsheet analysis. No update from Saturn though.");
         }
 
-        // Returns list of all .xlsm files' absolute path for the input directory.
+        // Returns list of all .xls* files' absolute path for the input directory.
         private IEnumerable<string> GetAllExcelMacroFiles()
         {
             string supportedFiletypes = "*.xls,*.xlsx,*.xlsm";
-            //TODO: move the directory input into a config file.
-            return Directory.GetFiles(@"C:\Data\LAS RQ34 zip code submissions\", "*.*", 
+            return Directory.GetFiles(ConfigurationManager.AppSettings["InputFilesDir"], "*.*", 
                                         SearchOption.AllDirectories).Where(s => 
                                         supportedFiletypes.Contains(Path.GetExtension(s).ToLower()));       
         }
@@ -53,7 +63,7 @@ namespace LASAnalysis
         {
             // Get the range C2:C62 
             answerMap = new Dictionary<string, string>();
-            GetCellRangeValues(@"C:\Data\LAS_Answer_Key\Zipcode task key.xls", "C", 2, 62, answerMap);
+            GetCellRangeValues(ConfigurationManager.AppSettings["AnswerFile"], answerMap);
         }
 
         // Workhorse program, goes over every single file, opens them and checks 
@@ -61,11 +71,10 @@ namespace LASAnalysis
         private void CheckInputCorrectness()
         {
             Dictionary<string, string> rangeMap = new Dictionary<string, string>();
-            int filesWithIncorrectInputCount = 0;
             foreach (string inputFile in GetAllExcelMacroFiles())
             {
                 // Get the required range.
-                GetCellRangeValues(inputFile, "C", 2, 62, rangeMap);
+                GetCellRangeValues(inputFile, rangeMap);
 
                 int incorrectCount = 0;
                 Dictionary<string, string> incorrectInputMap = new Dictionary<string, string>();
@@ -90,18 +99,13 @@ namespace LASAnalysis
                 // Process the result if there is any incorrect input.
                 if (incorrectCount > 0)
                 {
-                    filesWithIncorrectInputCount++;
                     ProcessCorrectnessResult(inputFile, incorrectCount, incorrectInputMap);
                 }                
             }
 
-            // Add the total no. of incorrect files to summary.
-            summaryBuilder.Append("Total files with incorrect input: " + filesWithIncorrectInputCount.ToString()
-                                    + Environment.NewLine);
-
             // Write out the result to file.
-            File.WriteAllText(_summaryOutputFile, summaryBuilder.ToString());
-            File.WriteAllText(_detailedResultOutputFile, detailedResultBuilder.ToString());
+            File.WriteAllText(summaryOutputFile, summaryBuilder.ToString());
+            File.WriteAllText(detailedResultOutputFile, detailedResultBuilder.ToString());
         }
 
         // Processes the correctness result of an input file. Given are the file path, no. of incorrect cells
@@ -109,18 +113,20 @@ namespace LASAnalysis
         private void ProcessCorrectnessResult(string filePath, int incorrectCount, Dictionary<string, string> incorrectInputMap)
         {
             // Add to the summary.
-            summaryBuilder.Append(filePath + "," + incorrectCount.ToString() + Environment.NewLine);
+            summaryBuilder.Append(filePath.Replace(ConfigurationManager.AppSettings["RemoveNamePrefix"], "") 
+                                    + "," + incorrectCount.ToString() + Environment.NewLine);
 
             // Add the incorrect cell with the input and the correct answer.
             foreach (KeyValuePair<string, string> incorrectInput in incorrectInputMap)
             {
-                detailedResultBuilder.Append(filePath + "," + incorrectInput.Key.ToString() + ","
+                detailedResultBuilder.Append(filePath.Replace(ConfigurationManager.AppSettings["RemoveNamePrefix"], "") 
+                                            + "," + incorrectInput.Key.ToString() + ","
                                             + incorrectInput.Value.ToString() + "," 
                                             + answerMap[incorrectInput.Key.ToString()] + Environment.NewLine);
             }            
         }
 
-        private void GetCellRangeValues(string filePath, string column, int rangeStart, int rangeEnd, Dictionary<string, string> rangeMap)
+        private void GetCellRangeValues(string filePath, Dictionary<string, string> rangeMap)
         {
             Excel.Workbook workBook = null;
             Excel.Worksheet sheet = null;
@@ -138,14 +144,20 @@ namespace LASAnalysis
                     // Get the active sheet, there should be only one (as expected).
                     sheet = (Excel.Worksheet)workBook.ActiveSheet;
                     
-                    for (int cellIndex = rangeStart; cellIndex <= rangeEnd; cellIndex++)
+                    for (int cellIndex = this.startColumnIndex; cellIndex <= this.endColumnIndex; cellIndex++)
                     {
-                        string cellLocation = column + cellIndex.ToString();
+                        string cellLocation = this.columnToCheck + cellIndex.ToString();
                         Excel.Range keyCell = (Excel.Range)sheet.Range[cellLocation];
                         Object keyCellValue = keyCell.Value2;
                         if (keyCellValue != null)
                         {
-                            rangeMap.Add(cellLocation, keyCellValue.ToString());
+                            String cellValue = keyCellValue.ToString();
+                            if (cellValue.Contains(","))
+                            {
+                                // Escape cell text with commas, so that they don't mess up the csv.
+                                cellValue = "\"" + cellValue + "\"";
+                            }
+                            rangeMap.Add(cellLocation, cellValue);
                         }
                         else
                         {
@@ -160,7 +172,7 @@ namespace LASAnalysis
                 Console.WriteLine(e.Message);
 
                 // Write the actual exception message to log file.
-                File.AppendAllText(_errorFile, e.ToString() + Environment.NewLine);
+                File.AppendAllText(errorFile, e.Message + Environment.NewLine);
             }
             finally
             {
@@ -194,12 +206,11 @@ namespace LASAnalysis
         }
 
         // Result file paths, gets overwritten every time program is run.
-        // TODO: Move them out to config.
-        private static readonly string _summaryOutputFile = @"..\..\..\output\Summary.csv";
-        private static readonly string _detailedResultOutputFile = @"..\..\..\output\Detailed Result.csv";
+        private string summaryOutputFile;
+        private string detailedResultOutputFile;
 
         // Error file.
-        private static readonly string _errorFile = @"..\..\..\output\ErrorLog.txt";
+        private string errorFile;
 
         // Map of answers with cells to value, eg. <Col#, 'value'> format.
         private Dictionary<string, string> answerMap;
@@ -210,5 +221,10 @@ namespace LASAnalysis
         // Buffers that holds the results in place until dumped on disk.
         private StringBuilder summaryBuilder;
         private StringBuilder detailedResultBuilder;
+
+        // Cell range to check.
+        private string columnToCheck;
+        private int startColumnIndex;
+        private int endColumnIndex;
     }
 }
