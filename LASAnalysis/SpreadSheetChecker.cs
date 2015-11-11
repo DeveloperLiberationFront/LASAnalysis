@@ -20,6 +20,10 @@ namespace LASAnalysis
             this.summaryBuilder = new StringBuilder();
             this.detailedResultBuilder = new StringBuilder();
 
+            // Add headers for output files.
+            summaryBuilder.Append("Filename,No. of Incorrect Input" + System.Environment.NewLine);
+            detailedResultBuilder.Append("Filename,Incorrect Cell,Given Input,Correct Answer" + System.Environment.NewLine);
+
             // Load the answer keys.
             LoadAnswerKey();
 
@@ -105,21 +109,15 @@ namespace LASAnalysis
         private void ProcessCorrectnessResult(string filePath, int incorrectCount, Dictionary<string, string> incorrectInputMap)
         {
             // Add to the summary.
-            summaryBuilder.Append(filePath + ": " + incorrectCount.ToString() + " incorrect" + Environment.NewLine);
-
-            // Add detailed result.
-            detailedResultBuilder.Append(filePath + ": " + incorrectCount.ToString() + " incorrect" + Environment.NewLine);
+            summaryBuilder.Append(filePath + "," + incorrectCount.ToString() + Environment.NewLine);
 
             // Add the incorrect cell with the input and the correct answer.
             foreach (KeyValuePair<string, string> incorrectInput in incorrectInputMap)
             {
-                detailedResultBuilder.Append("Cell " + incorrectInput.Key.ToString() + ", Input: "
-                                            + incorrectInput.Value.ToString() + ", Correct:" 
+                detailedResultBuilder.Append(filePath + "," + incorrectInput.Key.ToString() + ","
+                                            + incorrectInput.Value.ToString() + "," 
                                             + answerMap[incorrectInput.Key.ToString()] + Environment.NewLine);
-            }
-
-            // For spacing.
-            detailedResultBuilder.Append(Environment.NewLine);
+            }            
         }
 
         private void GetCellRangeValues(string filePath, string column, int rangeStart, int rangeEnd, Dictionary<string, string> rangeMap)
@@ -197,8 +195,8 @@ namespace LASAnalysis
 
         // Result file paths, gets overwritten every time program is run.
         // TODO: Move them out to config.
-        private static readonly string _summaryOutputFile = @"..\..\..\output\Summary.txt";
-        private static readonly string _detailedResultOutputFile = @"..\..\..\output\Detailed Result.txt";
+        private static readonly string _summaryOutputFile = @"..\..\..\output\Summary.csv";
+        private static readonly string _detailedResultOutputFile = @"..\..\..\output\Detailed Result.csv";
 
         // Error file.
         private static readonly string _errorFile = @"..\..\..\output\ErrorLog.txt";
