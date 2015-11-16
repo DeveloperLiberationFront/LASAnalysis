@@ -89,7 +89,16 @@ namespace LASAnalysis
                         continue;
                     }
 
-                    if (!answer.Equals(input.Trim()))
+                    // Check if there is a token to ignore in the input.
+                    String inputToCheck = input;
+                    string ignoreInInput = ConfigurationManager.AppSettings["IgnoreInInput"];
+                    if (!String.IsNullOrEmpty(ignoreInInput))
+                    {
+                        // Blank out the token to be ignored.
+                        inputToCheck = input.Replace(ignoreInInput, "");
+                    }
+
+                    if (!answer.Equals(inputToCheck.Trim()))
                     {
                         incorrectCount++;
                         incorrectInputMap.Add(entry.Key, input);
