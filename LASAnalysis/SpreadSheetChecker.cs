@@ -1,28 +1,274 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Configuration;
+using System.Diagnostics;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using System.IO;
 using System.Runtime.InteropServices;
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.VisualBasic;
+using Microsoft.CodeAnalysis.VisualBasic.Syntax;
 using Excel = Microsoft.Office.Interop.Excel;
+using VBA = Microsoft.Vbe.Interop;
 
 namespace LASAnalysis
 {
-    class SpreadSheetChecker : IDisposable
+    class SpreadSheetChecker : VisualBasicSyntaxWalker, IDisposable
     {
         public SpreadSheetChecker()
         {
             // Initiate the Excel application for checking.
             this.excelApp = new Excel.Application();
 
+            // Set up the error file and the directory it should be in.
+            this.errorFile = ConfigurationManager.AppSettings["ErrorFile"];
+
+            // Make sure to have the directory created, if it does not exist.
+            Directory.CreateDirectory(Path.GetDirectoryName(errorFile));
+
+            // Get the setting for what operation to do.
+            bool doMacroParsing = Convert.ToBoolean(ConfigurationManager.AppSettings["MacroParsing"]);
+            if (doMacroParsing)
+            {
+                DoMacroParsing();
+            }
+            else
+            {
+                DoCorrectnessChecking();
+            }            
+        }
+
+        // Override functions for VB syntax walker.
+        public override void VisitAssignmentStatement(AssignmentStatementSyntax node)
+        {
+            base.VisitAssignmentStatement(node);
+
+            ExpressionSyntax left = node.Left as ExpressionSyntax;
+            if (left.ToString().Equals("ActiveCell.FormulaR1C1"))
+            {
+                ExpressionSyntax right = node.Right as ExpressionSyntax;
+                string formulaString = right.ToString();
+                if (formulaString.StartsWith("\"="))
+                {
+                    // Remove the leading and trailing quotes and replace all double quotes with single ones.
+                    formulaString = formulaString.Substring(1, formulaString.Length - 2);
+                    formulaString = formulaString.Replace("\"\"", "\"");
+                    macroCellFormula.Add(formulaString);
+                }
+            }
+        }
+
+        public override void VisitExpressionStatement(ExpressionStatementSyntax node)
+        {
+            base.VisitExpressionStatement(node);
+
+            // Get the first syntax node.
+            foreach (SyntaxNode child in node.ChildNodes())
+            {
+                // Operations are of invocation expression kind.
+                if (child.IsKind(SyntaxKind.InvocationExpression))
+                {
+                    InvocationExpressionSyntax expr = child as InvocationExpressionSyntax;
+                    string exprText = expr.Expression.ToString();
+
+                    // Split the expression on the dot token.
+                    string[] exprTokens = exprText.Split('.');
+
+                    //Debug.Assert(exprTokens.Length == 2, "Nested member access.");
+
+                    // Add the last token as the operation.
+                    macroOperations.Add(exprTokens[exprTokens.Length - 1]);
+                }
+            }
+        }
+
+        // Workhorse function for parsing macros in the input file sets.
+        private void DoMacroParsing()
+        {
+            // Initialize the output file.
+            this.macroInfoOutputFile = ConfigurationManager.AppSettings["MacroFile"];
+
+            // Initialize the macro result builder.
+            this.macroInfoBuilder = new StringBuilder();
+
+            // Add headers.
+            this.macroInfoBuilder.Append("File Name,Macro Name,Fomulas Used in Macro,Operations Used in Macro"
+                                            + Environment.NewLine);
+
+            // Initiaize the collections.
+            this.macroOperations = new HashSet<string>();
+            this.macroCellFormula = new List<string>();
+
+            Console.WriteLine("Do not disturb, parsing VB macros in excel file.");
+
+            foreach (string filePath in GetAllExcelMacroFiles())
+            {
+                ParseVBMacro(filePath);
+            }
+
+            // Write out the results.
+            File.WriteAllText(macroInfoOutputFile, macroInfoBuilder.ToString());
+
+            Console.WriteLine("Done with that horrible stuff, just put me out of misery.");
+        }
+
+        private void ParseVBMacro(string filePath)
+        {
+            Excel.Workbook workBook = null;
+
+            try
+            {
+                if (this.excelApp != null)
+                {
+                    workBook = this.excelApp.Workbooks.Open(filePath);
+
+                    // Check if we have VB macros or not.
+                    if (workBook.HasVBProject)
+                    {
+                        // Get the project.
+                        VBA.VBProject project = workBook.VBProject;
+                        
+                        // Process each component in project.
+                        foreach (VBA.VBComponent component in project.VBComponents)
+                        {
+                            ParseVBComponent(filePath, component);
+                        }                                              
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                // Dump the message on console.
+                Console.WriteLine(e.Message);
+
+                // Write the actual exception message to log file.
+                File.AppendAllText(errorFile, e.Message + Environment.NewLine);
+            }
+            finally
+            {
+                // Close the workbook without saving anything.
+                if (workBook != null)
+                {
+                    workBook.Close(false);
+                }
+
+                if (workBook != null)
+                {
+                    Marshal.ReleaseComObject(workBook);
+                }
+            }
+        }
+
+        private void ParseVBComponent(string filePath, VBA.VBComponent component)
+        {
+            if (component != null)
+            {
+                // Get the file name prefix to remove.
+                string filePrefix = ConfigurationManager.AppSettings["RemoveNamePrefix"];
+
+                VBA.vbext_ProcKind procedureType = VBA.vbext_ProcKind.vbext_pk_Proc;
+                VBA.CodeModule componentCode = component.CodeModule;
+
+                // Clear out the containers.
+                macroOperations.Clear();
+                macroCellFormula.Clear();
+
+                string procedureName = "";
+                for (int line = 1; line < componentCode.CountOfLines; line++)
+                {
+                    // Name of the macro procedure.
+                    procedureName = componentCode.get_ProcOfLine(line, out procedureType);
+                    
+                    if (procedureName != string.Empty)
+                    {
+                        int procedureLines = componentCode.get_ProcCountLines(procedureName, procedureType);
+                        int procedureStartLine = componentCode.get_ProcStartLine(procedureName, procedureType);
+
+                        string procedureBody = componentCode.get_Lines(procedureStartLine, procedureLines);
+                        CompilationUnitSyntax root = VisualBasicSyntaxTree.ParseText(procedureBody).GetRoot()
+                                                        as CompilationUnitSyntax;
+
+                        /* TODO: If we wanted to iterate through the statements of the sub block.
+                        // Get the statements within the sub block.
+                        MethodBlockSyntax macro = root.Members[0] as MethodBlockSyntax;
+                        SyntaxList<StatementSyntax> statements = (SyntaxList<StatementSyntax>)macro.Statements;
+
+                        int statementCount = 0;
+                        foreach (StatementSyntax statement in statements)
+                        {
+                            Console.WriteLine(statement.Kind().ToString());
+                            Console.WriteLine(i.ToString() + " : " + statement.ToString());
+                            statementCount++;
+                        }
+                        */
+
+                        // Do the parsing inside the syntax walker.
+                        this.Visit(root);
+
+                        line += procedureLines - 1;
+                    }
+                }
+
+                if (macroCellFormula.Count > 0 || macroOperations.Count > 0)
+                {
+                    // Add the file name.
+                    macroInfoBuilder.Append(filePath.Replace(filePrefix, ""));
+                    macroInfoBuilder.Append("," + procedureName);
+
+                    // Check if we have information for this component and add them.
+                    if (macroCellFormula.Count > 0)
+                    {
+                        macroInfoBuilder.Append("," + EscapeCsvData(string.Join(", ", macroCellFormula)));
+                    }
+                    else
+                    {
+                        macroInfoBuilder.Append(",");
+                    }
+
+                    if (macroOperations.Count > 0)
+                    {
+                        macroInfoBuilder.Append("," + EscapeCsvData(string.Join(", ", macroOperations)));
+                    }
+                    else
+                    {
+                        macroInfoBuilder.Append(",");
+                    }
+
+                    macroInfoBuilder.Append(Environment.NewLine);
+                }                   
+            }
+        }
+
+        private static string EscapeCsvData(string data)
+        {
+            if (data.Contains("\""))
+            {
+                data = data.Replace("\"", "\"\"");
+            }
+
+            if (data.Contains(","))
+            {
+                data = String.Format("\"{0}\"", data);
+            }
+
+            if (data.Contains(Environment.NewLine))
+            {
+                data = String.Format("\"{0}\"", data);
+            }
+
+            return data;
+        }
+
+
+        private void DoCorrectnessChecking()
+        {
             // Initiate the result buffers.
             this.summaryBuilder = new StringBuilder();
             this.detailedResultBuilder = new StringBuilder();
 
             // Set up the file names from configuration.
-            this.errorFile = ConfigurationManager.AppSettings["ErrorFile"];
             this.summaryOutputFile = ConfigurationManager.AppSettings["SummaryFile"];
             this.detailedResultOutputFile = ConfigurationManager.AppSettings["DetailedFile"];
 
@@ -37,9 +283,6 @@ namespace LASAnalysis
 
             // Load the answer keys.
             LoadAnswerKey();
-
-            // Make sure to have the directory created, if it does not exist.
-            Directory.CreateDirectory(Path.GetDirectoryName(summaryOutputFile));
 
             Console.WriteLine("Fetching refracted light from Saturn's rings, and analyzing some spreadsheets...");
 
@@ -207,6 +450,7 @@ namespace LASAnalysis
         // Result file paths, gets overwritten every time program is run.
         private string summaryOutputFile;
         private string detailedResultOutputFile;
+        private string macroInfoOutputFile;
 
         // Error file.
         private string errorFile;
@@ -214,12 +458,17 @@ namespace LASAnalysis
         // Map of answers with cells to value, eg. <Col#, 'value'> format.
         private Dictionary<string, string> answerMap;
 
+        // Collections to contain VB component infromations.
+        private HashSet<string> macroOperations;
+        private List<string> macroCellFormula;
+
         // Single Excel interop app, so that we don't keep on opening stuff.
         private Excel.Application excelApp;
 
         // Buffers that holds the results in place until dumped on disk.
         private StringBuilder summaryBuilder;
         private StringBuilder detailedResultBuilder;
+        private StringBuilder macroInfoBuilder;
 
         // Cell range to check.
         private string columnToCheck;
